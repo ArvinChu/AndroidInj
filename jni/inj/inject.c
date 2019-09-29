@@ -20,16 +20,23 @@
 #include <sys/wait.h>
 #include <jni.h>
 
+#include <sys/stat.h>
+#include <errno.h>
+#include <fcntl.h>
+
 char *sos[] = {
-        "linker"
-        "libdvm.so",
-        "libnativehelper.so",
-        "libandroid_runtime.so",
-        "libmath.so",
-        "test",
-        "libc.so",
+		"libspice.so",
+//        "linker",
+//        "libdvm.so",
+//        "libnativehelper.so",
+//        "libandroid_runtime.so",
+//        "libmath.so",
+//        "test",
+//        "libc.so",
         NULL
 };
+
+struct process_info processinfo;
 
 void call_shit(struct elf_info *einfo) {
     unsigned long addr2 = 0;
@@ -71,38 +78,124 @@ void call_shit(struct elf_info *einfo) {
     ptrace_dump_regs(&regs,"before return call_shit\n");
 }
 
-int main(int argc, char *argv[]) {
-    int i=0, pid;
-    struct link_map *map;
-    struct elf_info einfo;
+void write_pipe() {
+	int fd;
+	char *pipe_name = "/data/hook_poll";
 
-    extern dl_fl_t ldl;
+	if((fd = open(pipe_name, O_WRONLY | O_NONBLOCK)) < 0) {
+		LOGE("write_pipe open %s failed! errno %d", pipe_name, errno);
+		errno = 0;
+		return;
+	}
+	close(fd);
+	// waiting read
+	usleep(100000);
+}
 
-    void *handle = NULL;
-    long proc = 0;
-    long hooker_fopen = 0;
-    (void)argc;
-    pid = atoi(argv[1]);
+int find_pid_of(const char *process_name) {
+    int id;
+    pid_t pid = -1;
+    DIR* dir;
+    FILE *fp;
+    char filename[32];
+    char cmdline[256];
 
-    while (i++ < 10) {
-		ptrace_attach(pid);
-		ptrace_find_dlinfo(pid);
-		handle = ptrace_dlopen(pid, "/system/lib/libmynet.so", 1);
-		LOGI("ptrace_dlopen handle %p\n",handle);
-		proc = (long)ptrace_dlsym(pid, handle, "my_connect");
-		LOGI("my_connect = %lx\n", proc);
-		long addr = replace_all_rels(pid, "connect", proc, sos);
-		ptrace_detach(pid);
+    struct dirent * entry;
 
-		// revert
-		sleep(60);
-		ptrace_attach(pid);
-		replace_all_rels(pid, "connect", addr, sos);
-		ptrace_dlclose(pid, handle);
-		ptrace_detach(pid);
+    if (process_name == NULL)
+        return -1;
 
-		sleep(30);
+    dir = opendir("/proc");
+    if (dir == NULL)
+        return -1;
+
+    while((entry = readdir(dir)) != NULL) {
+        id = atoi(entry->d_name);
+        if (id != 0) {
+            sprintf(filename, "/proc/%d/cmdline", id);
+            fp = fopen(filename, "r");
+            if (fp) {
+                fgets(cmdline, sizeof(cmdline), fp);
+                fclose(fp);
+
+                if (strcmp(process_name, cmdline) == 0) {
+                    /* process found */
+                    pid = id;
+                    break;
+                }
+            }
+        }
     }
+
+    closedir(dir);
+    return pid;
+}
+
+int find_symbol_address(int pid, const char *function_name, const char *load_library_path) {
+	dl_fl_t *dlinfo = NULL;
+	unsigned long symbol_address = 0;
+
+	dlinfo = ptrace_find_dlinfo(pid);
+	if (dlinfo != NULL) {
+		processinfo.handle = ptrace_dlopen(pid, load_library_path, 1);
+		if (processinfo.handle != NULL) {
+			symbol_address = (unsigned long) ptrace_dlsym(pid, processinfo.handle, function_name);
+		}
+	}
+
+	return symbol_address;
+}
+
+int inject_remote_process(const char *target_process_name, const char *function_name, const char *target_so_name, const char *load_library_path) {
+	int pid = -1;
+	unsigned long symbol_address = 0;
+
+	pid = find_pid_of(target_process_name);
+	processinfo.pid = pid;
+	pint(processinfo.pid);
+	if (pid > 0) {
+		ptrace_attach(pid);
+		symbol_address = find_symbol_address(pid, function_name, load_library_path );
+		pint(symbol_address);
+		if (symbol_address > 0) {
+			processinfo.function_address = get_function_address(pid, function_name, target_so_name);
+			pint(processinfo.function_address);
+			if (processinfo.function_address > 0) {
+				ptrace_read(pid, processinfo.function_address, &processinfo.function_data, 4);
+				pint(processinfo.function_data);
+				ptrace_write(pid, processinfo.function_address, &symbol_address, 4);
+			}
+		}
+		ptrace_detach(pid);
+	}
+	return 1;
+}
+
+void restore_remote_process() {
+	write_pipe();
+
+	if (processinfo.pid > 0) {
+		ptrace_attach(processinfo.pid);
+		if (processinfo.function_address > 0) {
+			ptrace_write(processinfo.pid, processinfo.function_address, &processinfo.function_data, 4);
+		}
+		if (processinfo.handle != NULL) {
+			ptrace_dlclose(processinfo.pid, processinfo.handle);
+		}
+		ptrace_detach(processinfo.pid);
+	}
+}
+
+
+
+int main(int argc, char *argv[]) {
+	int i = 0;
+	while (i++ < 100) {
+		inject_remote_process("com.ruijie.rccstu:RccRemoteProcess", "poll", "libspice.so", "/system/lib/libmynet.so");
+		sleep(10);
+		restore_remote_process();
+		sleep(5);
+	}
     // end
     exit(0);
 }

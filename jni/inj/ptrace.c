@@ -55,10 +55,10 @@ void ptrace_dump_regs(regs_t *regs, char *msg) {
 //	#define ARM_r0 uregs[0]
 //	#define ARM_ORIG_r0 uregs[17]
     int i = 0;
-    LOGI("------regs %s-----\n", msg);
-    for (i = 0; i < 18; i++) {
-    	LOGI("r[%02d]=%lx\n", i, regs->uregs[i]);
-    }
+//    LOGI("------regs %s-----\n", msg);
+//    for (i = 0; i < 18; i++) {
+//    	LOGI("r[%02d]=%lx\n", i, regs->uregs[i]);
+//    }
 }
 
 /**
@@ -165,7 +165,7 @@ void ptrace_write(int pid, unsigned long addr, void *vptr, int len) {
         count += 4;
 
         if (errno != 0)
-            LOGE("ptrace_write failed\t %ld\n", addr + count);
+            LOGE("ptrace_write failed\t %ld, errno %d", addr + count, errno);
     }
 }
 
@@ -518,7 +518,7 @@ static Elf32_Addr get_linker_base(int pid, Elf32_Addr *base_start, Elf32_Addr *b
             if (!linestr) {
                 break;
             }
-            LOGI("........%s <--\n", line);
+
             if (strlen(line) > atleast && strstr(line, "/system/bin/linker")) {
                 memset(startbuf, 0, sizeof(startbuf));
                 memset(endbuf, 0, sizeof(endbuf));

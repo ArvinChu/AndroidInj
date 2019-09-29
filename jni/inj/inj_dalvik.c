@@ -54,7 +54,7 @@ int main(int argc, char *argv[]) {
     LOGI("ptrace_dlopen handle %p\n",handle);
     proc = (long)ptrace_dlsym(pid, handle, "my_connect");
     LOGI("my_connect = %lx\n",proc);
-    replace_all_rels(pid, "connect", proc, sos);
+    // replace_all_rels(pid, "connect", proc, sos);
     ptrace_detach(pid);
     exit(0);
 

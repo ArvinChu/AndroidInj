@@ -16,6 +16,43 @@
 #include <elf.h>
 #endif
 
+/**
+ * 获取 ELF 文件起始地址
+ */
+unsigned long get_elf_address(int pid, const char *soname) {
+	FILE *file = NULL;
+	char maps[80];
+	char line[200];
+	char soaddrs[20];
+	char soaddr[10];
+	unsigned long base = 0;
+
+	memset(maps, 0, sizeof(maps));
+	memset(soaddrs, 0, sizeof(soaddrs));
+	memset(soaddr, 0, sizeof(soaddr));
+	sprintf(maps, "/proc/%d/maps", pid);
+	file = fopen(maps, "r");
+	if(!file) {
+		LOGE("open %s error!\n", maps);
+	}
+	// 读取文件的每一行
+	while(fgets(line, sizeof(line), file)) {
+		// 获取匹配soname的行
+		if(strstr(line, soname) == NULL) continue;
+		if(strstr(line, "r-xp") == NULL) continue;
+
+		// 解析匹配行内容（*是略过该字符串），获取ELF文件起始地址
+		sscanf(line, "%s %*s %*s %*s %*s %*s", soaddrs);
+		// 获取起始地址（[^-]是读到‘-’为止）
+		sscanf(soaddrs, "%[^-]", soaddr);
+		// 表示转为16进制unsigned long类型
+		base = strtoul(soaddr, NULL, 16);
+		break;
+	}
+
+	return base;
+}
+
 // typedef __uint32_t	Elf32_Addr;	/* Unsigned program address */
 /**
  * 获取 ELF 文件信息
@@ -53,6 +90,8 @@ void get_elf_info(int pid, Elf32_Addr base, struct elf_info *einfo) {
     puint(einfo->phdr_addr);
     // 文件类型: *.a *.o *.so bin等等
     puint(einfo->ehdr.e_type);
+    // 程序头表中有多少个项
+    puint(einfo->ehdr.e_phnum);
 //    /* Program Header */
 //    typedef struct {
 //    	Elf32_Word	p_type;		/* segment type */
@@ -66,14 +105,38 @@ void get_elf_info(int pid, Elf32_Addr base, struct elf_info *einfo) {
 //    } Elf32_Phdr;
     // 读取程序头表第1项
     ptrace_read(pid, einfo->phdr_addr, &einfo->phdr, sizeof(Elf32_Phdr));
-    // 打印程序头表中有多少个项
-    LOGI("dump %d phdr\n", einfo->ehdr.e_phnum);
-    // 读取所有程序头
-    for(i=0; i < einfo->ehdr.e_phnum; i++) {
-        Elf32_Phdr phdr;
-        ptrace_read(pid, einfo->phdr_addr + i * sizeof(Elf32_Phdr), &phdr, sizeof(Elf32_Phdr));
-    }
-    // 该Segment是否是.dynamic，这个段里保存了动态链接器所需要的基本信息
+
+//    // 读取所有程序头
+//    for(i=0; i < einfo->ehdr.e_phnum; i++) {
+//        Elf32_Phdr phdr;
+//        ptrace_read(pid, einfo->phdr_addr + i * sizeof(Elf32_Phdr), &phdr, sizeof(Elf32_Phdr));
+//    }
+
+//    // 读取所有节头
+//	for(i=0; i < einfo->ehdr.e_shnum; i++) {
+////		/* Section Header */
+////		typedef struct {
+////			Elf32_Word	sh_name;	/* name - index into section header string table section */
+////			Elf32_Word	sh_type;	/* type */
+////			Elf32_Word	sh_flags;	/* flags */
+////			Elf32_Addr	sh_addr;	/* address */
+////			Elf32_Off	sh_offset;	/* file offset */
+////			Elf32_Word	sh_size;	/* section size */
+////			Elf32_Word	sh_link;	/* section header table index link */
+////			Elf32_Word	sh_info;	/* extra information */
+////			Elf32_Word	sh_addralign;	/* address alignment */
+////			Elf32_Word	sh_entsize;	/* section entry size */
+////		} Elf32_Shdr;
+//		Elf32_Shdr shdr;
+//		ptrace_read(pid, einfo->base + einfo->ehdr.e_shoff + i * sizeof(Elf32_Shdr), &shdr, sizeof(Elf32_Shdr));
+//		LOGI("Section %d: 0x%08x, 0x%08x", i, shdr.sh_addr, shdr.sh_offset);
+//	}
+
+    /*
+     * 查找.dynamic段，这个段里保存了动态链接器所需要的基本信息。
+     * 可以通过对该段的解读，可以找到.symtab、.dynsym、.strtab等节，这样不用节头只用程序头也可以找出这些节。
+     * 于是在缺少节头表的情况下也可以通过这一段重建部分节头表
+     */
     while (einfo->phdr.p_type != PT_DYNAMIC) {
         ptrace_read(pid, einfo->phdr_addr += sizeof(Elf32_Phdr), &einfo->phdr, sizeof(Elf32_Phdr));
     }
@@ -97,68 +160,8 @@ void get_elf_info(int pid, Elf32_Addr base, struct elf_info *einfo) {
     // 计算GOT在内存中的虚拟地址
     einfo->got = (IS_DYN(einfo) ? einfo->base : 0) + (Elf32_Word) einfo->dyn.d_un.d_ptr;
     pint(einfo->got);
-    // map_addr的意义未明确
-    ptrace_read(pid, einfo->got + 4, &einfo->map_addr, 4);
+    ptrace_read(pid, einfo->got + sizeof(Elf32_Addr), &einfo->map_addr, sizeof(Elf32_Addr));
     pint(einfo->map_addr);
-}
-
-/**
- * 遍历重定位表查找符号（函数名）的重定位地址
- * 重定位：函数调用过程中, 动态链接器会把函数名与函数实际所在的地址(即符号定义)联系到一起
- */
-unsigned long find_sym_in_rel(struct elf_info *einfo, char *sym_name) {
-    Elf32_Rel rel;
-    Elf32_Sym sym;
-    unsigned int i;
-    char *str = NULL;
-    unsigned long ret;
-    struct dyn_info dinfo;
-    LOGI("find sym in rel %p %s \n", (void*)einfo->base, sym_name);
-
-    get_dyn_info(einfo, &dinfo);
-    pint(dinfo.nrels);
-    pint(dinfo.jmprel);
-    pint(dinfo.relsize);
-    pint(dinfo.totalrelsize);
-    for (i = 0; i < dinfo.nrels; i++) {
-        ptrace_read(einfo->pid, (unsigned long) (dinfo.jmprel + i * sizeof(Elf32_Rel)), &rel, sizeof(Elf32_Rel));
-        LOGI("rel addr %p\n", &rel);
-
-        // ELF32_R_SYM 表示重定位类型特定于处理器
-        if (ELF32_R_SYM(rel.r_info)) {
-        	// r_info 指定必须对其进行重定位的符号表索引以及要应用的重定位类型
-            ptrace_read(einfo->pid, dinfo.symtab + ELF32_R_SYM(rel.r_info) * sizeof(Elf32_Sym), &sym, sizeof(Elf32_Sym));
-//            /* Symbol Table Entry */
-//            typedef struct elf32_sym {
-//            	Elf32_Word	st_name;	/* name - index into string table */
-//            	Elf32_Addr	st_value;	/* symbol value */
-//            	Elf32_Word	st_size;	/* symbol size */
-//            	unsigned char	st_info;	/* type and binding */
-//            	unsigned char	st_other;	/* 0 - no defined meaning */
-//            	Elf32_Half	st_shndx;	/* section header index */
-//            } Elf32_Sym;
-            // st_name 表示符号名称的字符串表的索引；若其值为 0 则代表临时寄存器。
-            // 字符串表中的各字符串均以'\0'结尾
-            str = ptrace_readstr(einfo->pid, dinfo.strtab + sym.st_name);
-            LOGI("   str-> %s\n", str);
-            // str在ptrace_readstr函数中malloc，所以要在下面free
-            // 如果读取的字符串等于sym_name，则找到sym_name函数
-            if (strcmp(str, sym_name) == 0) {
-                free(str);
-                break;
-            }
-            free(str);
-        }
-    }
-
-    if (i == dinfo.nrels) {
-    	// 未找到
-        ret = 0;
-    } else {
-    	ret = (IS_DYN(einfo) ? einfo->base : 0) + rel.r_offset;
-    }
-    pint(ret);
-    return ret;
 }
 
 /**
@@ -167,9 +170,6 @@ unsigned long find_sym_in_rel(struct elf_info *einfo, char *sym_name) {
 void get_dyn_info(struct elf_info *einfo, struct dyn_info *dinfo) {
     Elf32_Dyn dyn;
     int i = 0;
-
-    LOGI("get_dyn_info 0x%08x...\n", einfo->dynaddr);
-
     // 包含Elf32_Dyn结构的数组的节
     ptrace_read(einfo->pid, einfo->dynaddr + i * sizeof(Elf32_Dyn), &dyn, sizeof(Elf32_Dyn));
     i++;
@@ -212,68 +212,104 @@ void get_dyn_info(struct elf_info *einfo, struct dyn_info *dinfo) {
 //    		Elf32_Word	r_info;		/* symbol table index and type */
 //    	} Elf32_Rel;
     	// 重定位项结构如上, 大小为8个字节
+    	LOGI("DT_RELENT relsize is 0");
         dinfo->relsize = 8;
     }
     // 重定位项的数量
     dinfo->nrels = dinfo->totalrelsize / dinfo->relsize;
 }
 
-long replace_all_rels(int pid, char *funcname, long addr, char **sos) {
-    FILE *m = NULL;
-    unsigned int i = 0;
-    char maps[80];
-    char line[200];
-    char soaddrs[20];
-    char soaddr[10];
-    char soname[60];
-    char prop[10];
-    long soaddval;
-    long base, function_addr;
-    memset(maps, 0, sizeof(maps));
-    memset(soaddrs, 0, sizeof(soaddrs));
-    memset(soaddr, 0, sizeof(soaddr));
-    sprintf(maps, "/proc/%d/maps", pid);
-    m = fopen(maps, "r");
-    if(!m) {
-    	LOGE("open %s error!\n", maps);
-    }
-    // 读取文件的每一行
-    while(fgets(line, sizeof(line), m)) {
-        int in_so_list = 0;
-        struct elf_info einfo;
-        long tmpaddr = 0;
-        // 如果以
-        // if(strstr(line,".so") == NULL && i != 0) continue;
-        if(strstr(line,"r-xp") == NULL) continue;
+/**
+ * 遍历重定位表查找符号（函数名）的重定位地址
+ * 重定位：函数调用过程中, 动态链接器会把函数名与函数实际所在的地址(即符号定义)联系到一起
+ */
+unsigned long find_sym_in_rel(struct elf_info *einfo, const char *sym_name) {
+    Elf32_Rel rel;
+    Elf32_Sym sym;
+    unsigned int i;
+    char *str = NULL;
+    unsigned long ret = 0;
+    struct dyn_info dinfo;
 
-        for(i = 0; sos[i] != NULL; i++) {
-            if(strstr(line, sos[i]) != NULL) {
-                in_so_list = 1;
+    get_dyn_info(einfo, &dinfo);
+    pint(dinfo.nrels);
+    pint(dinfo.strtab);
+    pint(dinfo.jmprel);
+    pint(dinfo.relsize);
+    pint(dinfo.totalrelsize);
+    for (i = 0; i < dinfo.nrels; i++) {
+        ptrace_read(einfo->pid, (unsigned long) (dinfo.jmprel + i * sizeof(Elf32_Rel)), &rel, sizeof(Elf32_Rel));
+        // ELF32_R_SYM 表示重定位类型特定于处理器
+        if (ELF32_R_SYM(rel.r_info)) {
+        	// r_info 指定必须对其进行重定位的符号表索引以及要应用的重定位类型
+            ptrace_read(einfo->pid, dinfo.symtab + ELF32_R_SYM(rel.r_info) * sizeof(Elf32_Sym), &sym, sizeof(Elf32_Sym));
+//            /* Symbol Table Entry */
+//            typedef struct elf32_sym {
+//            	Elf32_Word	st_name;	/* name - index into string table */
+//            	Elf32_Addr	st_value;	/* symbol value */
+//            	Elf32_Word	st_size;	/* symbol size */
+//            	unsigned char	st_info;	/* type and binding */
+//            	unsigned char	st_other;	/* 0 - no defined meaning */
+//            	Elf32_Half	st_shndx;	/* section header index */
+//            } Elf32_Sym;
+            // st_name 表示符号名称的字符串表的索引；若其值为 0 则代表临时寄存器。
+            // 字符串表中的各字符串均以'\0'结尾
+            str = ptrace_readstr(einfo->pid, dinfo.strtab + sym.st_name);
+//            LOGI("   str-> %s %d", str, ELF32_ST_BIND(sym.st_info));
+            // str在ptrace_readstr函数中malloc，所以要在下面free
+            // 如果读取的字符串等于sym_name，则找到sym_name函数
+            if (strcmp(str, sym_name) == 0) {
+                free(str);
+                ret = (IS_DYN(einfo) ? einfo->base : 0) + rel.r_offset;
                 break;
             }
-        }
-        if(!in_so_list) {
-            continue;
-        }
-        // 解析每一行内容（*是略过该字符串），获取ELF文件起始地址，属性，文件名
-        sscanf(line, "%s %s %*s %*s %*s %s", soaddrs, prop, soname);
-        // 获取起始地址（[^-]是读到‘-’为止）
-        sscanf(soaddrs, "%[^-]", soaddr);
-        LOGI("#### %s %s %s\n", soaddr, prop, soname);
-        // 表示转为16进制unsigned long类型
-        base = strtoul(soaddr, NULL, 16);
-        puint(base);
-        get_elf_info(pid, base, &einfo);
-        tmpaddr = find_sym_in_rel(&einfo, funcname);
-        if(tmpaddr != 0) {
-        	ptrace_read(pid, tmpaddr, &function_addr, 4);
-        	LOGI("base of %08x\n", (int)function_addr);
-            ptrace_write(pid, tmpaddr, &addr, 4);
-            LOGI("base of %-40s     %08x  %08x %08x\n", soname, (int)base, (int)tmpaddr, (int)addr);
-            return function_addr;
+            free(str);
         }
     }
+
+    if (i == dinfo.nrels) {
+		// 遍历符号表
+    	i = 1;
+		while (1) {
+			ptrace_read(einfo->pid, dinfo.symtab + i++ * sizeof(Elf32_Sym), &sym, sizeof(Elf32_Sym));
+			if (ELF32_ST_TYPE(sym.st_info) == STT_FUNC) {
+				str = ptrace_readstr(einfo->pid, dinfo.strtab + sym.st_name);
+				if (strcmp(str, sym_name) == 0) {
+					free(str);
+					ret = (IS_DYN(einfo) ? einfo->base : 0) + sym.st_value;
+					break;
+				}
+				free(str);
+			} else if (
+					ELF32_ST_BIND(sym.st_info) != STB_LOCAL &&
+					ELF32_ST_BIND(sym.st_info) != STB_GLOBAL &&
+					ELF32_ST_BIND(sym.st_info) != STB_WEAK &&
+					ELF32_ST_BIND(sym.st_info) != STB_NUM &&
+					ELF32_ST_BIND(sym.st_info) != STB_LOPROC &&
+					ELF32_ST_BIND(sym.st_info) != STB_HIPROC){
+				break;
+			}
+		}
+	}
+
+    if (ret == 0) {
+    	// 未找到
+        LOGI("find_sym_in_rel end! Can't find %s ", sym_name);
+    }
+    return ret;
 }
 
-
-
+/**
+ * 获取函数地址
+ */
+unsigned long get_function_address(int pid, const char *funcname, const char *soname) {
+	unsigned long elf_base = 0, function_base = 0;
+	elf_base = get_elf_address(pid, soname);
+	puint(elf_base);
+	if (elf_base != 0) {
+		struct elf_info einfo;
+		get_elf_info(pid, elf_base, &einfo);
+		function_base = find_sym_in_rel(&einfo, funcname);
+	}
+	return function_base;
+}

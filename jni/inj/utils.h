@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <dirent.h>
 #ifdef ANDROID
 #include <linux/user.h>
 #else
@@ -65,6 +66,7 @@ struct dyn_info{
     Elf32_Word nrels;
 };
 
+
 struct elf_info {
 	/**
 	 * 进程ID
@@ -75,11 +77,16 @@ struct elf_info {
     Elf32_Phdr phdr;
     Elf32_Dyn dyn;
     Elf32_Addr dynaddr;
+    /**
+     * GOT表项为Elf32_Addr结构
+     */
     Elf32_Word got;
     Elf32_Addr phdr_addr;
+    /**
+     * GOT[1] 动态库映射信息数据结构 link_map 地址
+     */
     Elf32_Addr map_addr;
     Elf32_Word nchains;
-
 };
 
 
@@ -88,7 +95,6 @@ typedef enum {
     PAT_STR,
     PAT_MEM
 }ptrace_arg_type;
-
 
 
 typedef struct {
@@ -104,6 +110,13 @@ typedef struct {
     };
 }ptrace_arg;
 
+struct process_info {
+	int pid;
+	void* handle;
+	unsigned long function_address;
+	unsigned long function_data;
+};
+
 
 typedef struct dl_fl dl_fl_t;
 
@@ -111,7 +124,7 @@ typedef struct dl_fl dl_fl_t;
 #define puint(_x) LOGI("[%20s( %04d )]  %-30s = %u (0x%08x)\n",__FUNCTION__,__LINE__, #_x, (unsigned int)(_x), (unsigned int)(_x))
 #define pstr(_x)  LOGI("[%20s( %04d )]  %-30s = %s \n",__FUNCTION__,__LINE__, #_x, (char*)(_x))
 
-
+// ptrace.c
 void ptrace_attach(pid_t pid);
 void ptrace_cont(pid_t pid);
 void ptrace_detach(pid_t pid);
@@ -130,18 +143,19 @@ int ptrace_mymath_add(pid_t pid, long mymath_add_addr, int a, int b) ;
 void ptrace_dump_regs(regs_t *regs, char *msg) ;
 int ptrace_wait_for_signal (int pid, int signal) ;
 int ptrace_call(int pid, long proc, int argc, ptrace_arg *argv);
-void set_hdr_addr(int imgaddr,int offaddr);
+
+// elf.c
+unsigned long get_elf_address(int pid, const char *soname);
 void get_elf_info(int pid, Elf32_Addr base, struct elf_info *einfo);
-void get_sym_info(int pid, struct link_map *lm) ;
-unsigned long find_symbol(int pid, struct link_map *map, char *sym_name) ;
-unsigned long find_symbol_in_linkmap(int pid, struct link_map *lm,char *sym_name);
-unsigned long find_sym_in_rel(struct elf_info *einfo, char *sym_name);
 void get_dyn_info(struct elf_info *einfo, struct dyn_info *dinfo);
+unsigned long find_sym_in_rel(struct elf_info *einfo, const char *sym_name);
+unsigned long get_function_address(int pid, const char *funcname, const char *soname);
 
-
-long replace_all_rels(int pid, char *funcname, long addr, char **white_sos);
-
-void elf_dump(int pid, void * addr);
+// inject.c
+int find_pid_of(const char *process_name);
+int find_symbol_address(int pid, const char *function_name, const char *load_library_path);
+int inject_remote_process(const char *target_process_name, const char *function_name, const char *target_so_name, const char *load_library_path);
+void restore_remote_process();
 
 /**
  * 判断该文件是否是*.so
