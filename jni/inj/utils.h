@@ -111,10 +111,10 @@ typedef struct {
 }ptrace_arg;
 
 struct process_info {
-	int pid;
-	void* handle;
-	unsigned long function_address;
-	unsigned long function_data;
+	int pid; // 进程ID
+	void* handle; // dlopen返回的handle
+	unsigned long function_address; // hook函数地址
+	unsigned long function_data; // hook函数地址中原始数据
 };
 
 
@@ -123,6 +123,11 @@ typedef struct dl_fl dl_fl_t;
 #define pint(_x)  LOGI("[%20s( %04d )]  %-30s = %d (0x%08x)\n",__FUNCTION__,__LINE__, #_x, (int)(_x), (int)(_x))
 #define puint(_x) LOGI("[%20s( %04d )]  %-30s = %u (0x%08x)\n",__FUNCTION__,__LINE__, #_x, (unsigned int)(_x), (unsigned int)(_x))
 #define pstr(_x)  LOGI("[%20s( %04d )]  %-30s = %s \n",__FUNCTION__,__LINE__, #_x, (char*)(_x))
+
+// server.c
+int create_socket();
+int send_message(int socketfd, char *message);
+int wait_client_message();
 
 // ptrace.c
 void ptrace_attach(pid_t pid);
@@ -153,9 +158,10 @@ unsigned long get_function_address(int pid, const char *funcname, const char *so
 
 // inject.c
 int find_pid_of(const char *process_name);
-int find_symbol_address(int pid, const char *function_name, const char *load_library_path);
+unsigned long find_symbol_address(int pid, const char *function_name, const char *load_library_path);
 int inject_remote_process(const char *target_process_name, const char *function_name, const char *target_so_name, const char *load_library_path);
 void restore_remote_process();
+
 
 /**
  * 判断该文件是否是*.so

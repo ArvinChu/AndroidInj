@@ -24,18 +24,6 @@
 #include <errno.h>
 #include <fcntl.h>
 
-char *sos[] = {
-		"libspice.so",
-//        "linker",
-//        "libdvm.so",
-//        "libnativehelper.so",
-//        "libandroid_runtime.so",
-//        "libmath.so",
-//        "test",
-//        "libc.so",
-        NULL
-};
-
 struct process_info processinfo;
 
 void call_shit(struct elf_info *einfo) {
@@ -78,6 +66,9 @@ void call_shit(struct elf_info *einfo) {
     ptrace_dump_regs(&regs,"before return call_shit\n");
 }
 
+/**
+ * 如果hook进程被阻塞，则通知其结束阻塞
+ */
 void write_pipe() {
 	int fd;
 	char *pipe_name = "/data/hook_poll";
@@ -92,6 +83,13 @@ void write_pipe() {
 	usleep(100000);
 }
 
+/**
+ * 根据进程名称查找进程ID
+ *
+ * @param process_name : 进程名称
+ *
+ * @return 进程ID
+ */
 int find_pid_of(const char *process_name) {
     int id;
     pid_t pid = -1;
@@ -131,7 +129,15 @@ int find_pid_of(const char *process_name) {
     return pid;
 }
 
-int find_symbol_address(int pid, const char *function_name, const char *load_library_path) {
+/**
+ * 使用dlopen加载hook库文件，并返回hook函数地址
+ *
+ * @param function_name : hook函数名称
+ * @param load_library_path : hook库文件路径
+ *
+ * @return hook函数地址
+ */
+unsigned long find_symbol_address(int pid, const char *function_name, const char *load_library_path) {
 	dl_fl_t *dlinfo = NULL;
 	unsigned long symbol_address = 0;
 
@@ -146,8 +152,18 @@ int find_symbol_address(int pid, const char *function_name, const char *load_lib
 	return symbol_address;
 }
 
+/**
+ * hook目标进程中目标so库中的目标函数
+ *
+ * @param target_process_name : 目标进程名
+ * @param function_name : 目标/替换函数名
+ * @param target_so_name : 目标so文件名
+ * @param load_library_path : hook库文件路径
+ *
+ * @return 1 : hook成功; other : hook失败
+ */
 int inject_remote_process(const char *target_process_name, const char *function_name, const char *target_so_name, const char *load_library_path) {
-	int pid = -1;
+	int pid = -1, result = -1;
 	unsigned long symbol_address = 0;
 
 	pid = find_pid_of(target_process_name);
@@ -164,13 +180,18 @@ int inject_remote_process(const char *target_process_name, const char *function_
 				ptrace_read(pid, processinfo.function_address, &processinfo.function_data, 4);
 				pint(processinfo.function_data);
 				ptrace_write(pid, processinfo.function_address, &symbol_address, 4);
+				result = 1;
 			}
 		}
 		ptrace_detach(pid);
 	}
-	return 1;
+
+	return result;
 }
 
+/**
+ * 恢复hook进程的状态(包含寄存器、函数)
+ */
 void restore_remote_process() {
 	write_pipe();
 
@@ -183,19 +204,20 @@ void restore_remote_process() {
 			ptrace_dlclose(processinfo.pid, processinfo.handle);
 		}
 		ptrace_detach(processinfo.pid);
+		processinfo.pid = -1;
 	}
 }
 
-
-
 int main(int argc, char *argv[]) {
-	int i = 0;
-	while (i++ < 100) {
-		inject_remote_process("com.ruijie.rccstu:RccRemoteProcess", "poll", "libspice.so", "/system/lib/libmynet.so");
-		sleep(10);
-		restore_remote_process();
-		sleep(5);
-	}
+//	int i = 99;
+//	while (i++ < 100) {
+//		inject_remote_process("com.ruijie.rccstu:RccRemoteProcess", "poll", "libspice.so", "/system/lib/libmynet.so");
+//		sleep(10);
+//		restore_remote_process();
+//		sleep(5);
+//	}
+	wait_client_message();
+
     // end
     exit(0);
 }
